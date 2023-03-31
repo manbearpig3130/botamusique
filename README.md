@@ -11,12 +11,12 @@ Maybe someday I'll clean up all this hackery into something more efficient and c
 
 Commands I've added:
 
-!gpt - Send a message to ChatGPT. Responds in channel. 
-!gptp - Send a message to ChatGPT. Responds privately. 
-!gpts - Send a message to ChatGPT. Responds with synthesized voice. 
-!gpt_reset - Reset the ChatGPT conversation. 
-!dalle_gen - Generate a 256x256 image from a prompt 
-!blockheight - Gets Bitcoin blockchain info from a local Bitcoin node
+- !gpt - Send a message to ChatGPT. Responds in channel. 
+- !gptp - Send a message to ChatGPT. Responds privately. 
+- !gpts - Send a message to ChatGPT. Responds with synthesized voice. 
+- !gpt_reset - Reset the ChatGPT conversation. 
+- !dalle_gen - Generate a 256x256 image from a prompt 
+- !blockheight - Gets Bitcoin blockchain info from a local Bitcoin node
 
 Predicted functionalities will be those people would expect from any classic music player.
 
