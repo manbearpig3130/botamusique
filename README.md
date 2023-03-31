@@ -4,7 +4,9 @@
 </div>
 
 BotWallis is a [Mumble](https://www.mumble.info/) music bot based on the AWESOME(!!!) botamusique project. (Thank you botamusique people for creating this thing which I've had so much fun with)
+
 Botwallis includes a bunch of stuff I've hacked together to implement the OpenAI API and Google Cloud Platform, as well as some hacks to accommodate my main Mumble server which is running umurmur on a router.
+
 Maybe someday I'll clean up all this hackery into something more efficient and clever, but for now this is working for me!
 
 Commands I've added:
