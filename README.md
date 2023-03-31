@@ -7,16 +7,17 @@ BotWallis is a [Mumble](https://www.mumble.info/) music bot based on the AWESOME
 
 Botwallis includes a bunch of stuff I've hacked together to implement the OpenAI API and Google Cloud Platform, as well as some hacks to accommodate my main Mumble server which is running umurmur on a router.
 
-Maybe someday I'll clean up all this hackery into something more efficient and clever, but for now this is working for me!
+Maybe someday I'll clean up all this hackery into something more efficient and clever, but for now this is entertaining and educational for me!
 
 Commands I've added:
-
 - !gpt - Send a message to ChatGPT. Responds in channel. 
 - !gptp - Send a message to ChatGPT. Responds privately. 
 - !gpts - Send a message to ChatGPT. Responds with synthesized voice. 
 - !gpt_reset - Reset the ChatGPT conversation. 
 - !dalle_gen - Generate a 256x256 image from a prompt 
 - !blockheight - Gets Bitcoin blockchain info from a local Bitcoin node
+
+Botwallis also greets members when they join a channel with a unique joke about their name. GPT-4 rocks! GPT-3.5 is a bit dumb sometimes, but is much faster
 
 Predicted functionalities will be those people would expect from any classic music player.
 
