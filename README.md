@@ -1,9 +1,21 @@
 <div align="center">
 <img src="static/image/logo.png" alt="botamusique" width="200px" />
-<h1>botamusique</h1>
+<h1>BotWallis</h1>
 </div>
 
-Botamusique is a [Mumble](https://www.mumble.info/) music bot.
+BotWallis is a [Mumble](https://www.mumble.info/) music bot based on the AWESOME(!!!) botamusique project. (Thank you botamusique people for creating this thing which I've had so much fun with)
+Botwallis includes a bunch of stuff I've hacked together to implement the OpenAI API and Google Cloud Platform, as well as some hacks to accommodate my main Mumble server which is running umurmur on a router.
+Maybe someday I'll clean up all this hackery into something more efficient and clever, but for now this is working for me!
+
+Commands I've added:
+
+!gpt - Send a message to ChatGPT. Responds in channel. 
+!gptp - Send a message to ChatGPT. Responds privately. 
+!gpts - Send a message to ChatGPT. Responds with synthesized voice. 
+!gpt_reset - Reset the ChatGPT conversation. 
+!dalle_gen - Generate a 256x256 image from a prompt 
+!blockheight - Gets Bitcoin blockchain info from a local Bitcoin node
+
 Predicted functionalities will be those people would expect from any classic music player.
 
 [![Build Status](https://ci.azlux.fr/api/badges/azlux/botamusique/status.svg)](https://ci.azlux.fr/azlux/botamusique)
