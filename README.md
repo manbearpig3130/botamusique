@@ -225,23 +225,12 @@ Exception: Could not find opus library. Make sure it is installed.
 ```
 You need to install the opus codec (not embedded in all system): `apt install libopus0`
 
-3. MacOS Users may encounter the following error:
-```
-ImportError: failed to find libmagic.  Check your installation
-```
-This is caused by missing `libmagic` binaries and can be solved by
-```bash
-brew install libmagic
-
-```
-One may also install `python-magic-bin` instead of `python-magic`.
-
-5. If you have a large amount of music files (>1000), it may take some time for the bot to boot, since
+3. If you have a large amount of music files (>1000), it may take some time for the bot to boot, since
 it will build up the cache for the music library on booting. You may want to disable this auto-scanning by
 setting ``refresh_cache_on_startup=False`` in `[bot]` section and control the scanning manually by
 ``!rescan`` command and the *Rescan Files* button on the web interface.
 
-6. Alpine Linux requires some extra dependencies during the installation (in order to compile Pillow):
+4. Alpine Linux requires some extra dependencies during the installation (in order to compile Pillow):
 ```
 python3-dev musl-lib libmagic jpeg-dev zlib-dev gcc
 ```
@@ -252,7 +241,7 @@ For more information, see [#122](https://github.com/azlux/botamusique/issues/122
 If you ran into some problems in using the bot, or discovered bugs and want to talk to us, you may
 
  - Start a new issue,
- - Ask in the Matrix channel of Mumble [#mumble:matrix.org](https://matrix.to/#/#mumble:matrix.org) (we are usually there to help).
+ - Ask in #mumble at freenode.net (we are usually there to help)
 
 ## Contributors
 If you want to help us develop, you're welcome to fork and submit pull requests (fixes and new features).

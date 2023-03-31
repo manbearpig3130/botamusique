@@ -323,8 +323,7 @@ def youtube_search(query):
     import json
 
     try:
-        cookie_file =  var.config.get('youtube_dl', 'cookie_file')
-        cookie = parse_cookie_file(cookie_file) if cookie_file else {}
+        cookie = json.loads(var.config.get('bot', 'youtube_query_cookie', fallback='{}'))
         r = requests.get("https://www.youtube.com/results", cookies=cookie,
                          params={'search_query': query}, timeout=5)
         result_json_match = re.findall(r">var ytInitialData = (.*?);</script>", r.text)
@@ -457,7 +456,7 @@ def get_snapshot_version():
         try:
             ret = subprocess.check_output(["git", "describe", "--tags"]).strip()
             ver = ret.decode("utf-8")
-        except (FileNotFoundError, subprocess.CalledProcessError):
+        except FileNotFoundError:
             try:
                 with open(os.path.join(root_dir, ".git/refs/heads/master")) as f:
                     ver = "g" + f.read()[:7]
@@ -562,28 +561,3 @@ def clear_tmp_folder(path, size):
                         except (FileNotFoundError, OSError):
                             continue
                     return
-
-
-def check_extra_config(config, template):
-    extra = []
-
-    for key in config.sections():
-        if key in ['radio']:
-            continue
-        for opt in config.options(key):
-            if not template.has_option(key, opt):
-                extra.append((key, opt))
-
-    return extra
-
-
-def parse_cookie_file(cookiefile):
-    # https://stackoverflow.com/a/54659484/1584825
-
-    cookies = {}
-    with open (cookiefile, 'r') as fp:
-        for line in fp:
-            if not re.match(r'^#', line):
-                lineFields = line.strip().split('\t')
-                cookies[lineFields[5]] = lineFields[6]
-    return cookies

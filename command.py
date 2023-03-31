@@ -5,6 +5,8 @@ import datetime
 import json
 import re
 import pymumble_py3 as pymumble
+import requests
+import pprint
 
 from constants import tr_cli as tr
 from constants import commands
@@ -19,8 +21,15 @@ from media.cache import get_cached_wrapper_from_scrap, get_cached_wrapper_by_id,
     get_cached_wrapper, get_cached_wrappers, get_cached_wrapper_from_dict, get_cached_wrappers_from_dicts
 from media.url_from_playlist import get_playlist_info
 
-log = logging.getLogger("bot")
+import openai, os, wget, base64
+from google.cloud import texttospeech
+import subprocess, threading
+from functools import partial
+from io import BytesIO
+from PIL import Image
 
+
+log = logging.getLogger("bot")
 
 def register_all_commands(bot):
     bot.register_command(commands('add_from_shortlist'), cmd_shortlist)
@@ -63,6 +72,12 @@ def register_all_commands(bot):
     bot.register_command(commands('volume'), cmd_volume)
     bot.register_command(commands('yt_play'), cmd_yt_play)
     bot.register_command(commands('yt_search'), cmd_yt_search)
+    bot.register_command(commands('blockheight'), cmd_get_blockheight)
+    bot.register_command(commands('gpt'), cmd_gpt)
+    bot.register_command(commands('gptp'), cmd_gptp)
+    bot.register_command(commands('gpt_reset'), cmd_gpt_reset)
+    bot.register_command(commands('gpts'), cmd_gpts)
+    bot.register_command(commands('dalle_gen'), cmd_dalle_gen)
 
     # admin command
     bot.register_command(commands('add_webinterface_user'), cmd_web_user_add, admin=True)
@@ -70,7 +85,6 @@ def register_all_commands(bot):
     bot.register_command(commands('kill'), cmd_kill, admin=True)
     bot.register_command(commands('list_webinterface_user'), cmd_web_user_list, admin=True)
     bot.register_command(commands('remove_webinterface_user'), cmd_web_user_remove, admin=True)
-    bot.register_command(commands('max_volume'), cmd_max_volume, admin=True)
     bot.register_command(commands('update'), cmd_update, no_partial_match=True, admin=True)
     bot.register_command(commands('url_ban'), cmd_url_ban, no_partial_match=True, admin=True)
     bot.register_command(commands('url_ban_list'), cmd_url_ban_list, no_partial_match=True, admin=True)
@@ -120,6 +134,30 @@ def send_multi_lines_in_channel(bot, lines, linebreak="<br />"):
 
     bot.send_channel_msg(msg)
 
+def send_split_message_in_channel(bot, message):
+    max_message_length = bot.mumble.get_max_message_length()
+
+    def split_message_at_spaces(message, max_length):
+        words = message.split(' ')
+        message_parts = []
+        current_part = ''
+        for word in words:
+            if len(current_part) + len(word) + 1 > max_length:
+                message_parts.append(current_part.strip())
+                current_part = ''
+            current_part += ' ' + word
+        message_parts.append(current_part.strip())
+        return message_parts
+
+    if max_message_length:
+        # Split the message into smaller parts if it exceeds the maximum allowed length
+        message_parts = split_message_at_spaces(message, max_message_length)
+    else:
+        # If there's no maximum length set, send the message as is
+        message_parts = [message]
+
+    for msg_part in message_parts:
+        bot.send_channel_msg(msg_part)
 
 def send_item_added_message(bot, wrapper, index, text):
     if index == var.playlist.current_index + 1:
@@ -132,22 +170,202 @@ def send_item_added_message(bot, wrapper, index, text):
         bot.send_msg(tr('file_added', item=wrapper.format_song_string()) +
                      tr('position_in_the_queue', position=f"{index + 1}/{len(var.playlist)}."), text)
 
+def dalle_gen(inprompt):
+    openai.api_key = var.config.get("bot", "openai_api_key")
+    image_resp = openai.Image.create(prompt=inprompt, n=1, size="256x256")
+    url = image_resp['data'][0]['url']
+    filename = str(datetime.datetime.now().strftime('%d%m%y%H%M%S%f')[:-3]) + ".png"
+    path = "/home/pi/stuff/botamusique/botwallis/dalle/"
+    print(url)
+    print(filename)
+    wget.download(url, path + filename)
+    return url, filename
+    
+
+def ask_gpt(input, user):
+    global currentMessages
+    pprint.pprint(user)
+    openai.api_key = var.config.get("bot", "openai_api_key")
+    var.config.get("server", "host")
+    currentMessages.append({"role": "user", "content": user + ": " + input})
+    response = openai.ChatCompletion.create(
+        model=var.config.get("bot", "gpt_model"),
+        temperature=0.9,
+        max_tokens=600,
+        messages=currentMessages
+    )
+    chatResponse = response['choices'][0]['message']['content']
+    currentMessages.append({"role": "assistant", "content": chatResponse})
+    pprint.pprint(currentMessages)
+    return chatResponse
+
+def gpt_welcome(input, user):
+    global welcomeMessages
+    openai.api_key = var.config.get("bot", "openai_api_key")
+    welcomeMessages.append({"role": "system", "content": input})
+    response = openai.ChatCompletion.create(
+        model=var.config.get("bot", "gpt_model"),
+        temperature=1.0,
+        max_tokens=400,
+        messages=welcomeMessages
+    )
+    ## Keep the list at 5 messages to avoid racking up too many tokens just for welcome messages
+    if len(welcomeMessages) >= 5:
+        for message in welcomeMessages:
+            if "has joined the server." in message['content']:
+                welcomeMessages.remove(message)
+            welcomeMessages.pop(1)
+                
+    chatResponse = response['choices'][0]['message']['content']
+    welcomeMessages.append({"role": "assistant", "content": chatResponse})
+    pprint.pprint(welcomeMessages)
+    return chatResponse
+
+def voice(txt, dumb=False):
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = var.config.get("bot", "google_application_credentials")
+    client = texttospeech.TextToSpeechClient()
+    if dumb == True:
+        synth_input = texttospeech.SynthesisInput(text=txt)
+    else:
+        synth_input = texttospeech.SynthesisInput(ssml=txt)
+    voice = texttospeech.VoiceSelectionParams(language_code="en-GB", name="en-GB-Neural2-B")
+    audio_config=texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3)
+    response = client.synthesize_speech(input=synth_input, voice=voice, audio_config=audio_config)
+    uid = str(datetime.datetime.now().strftime('%d%m%y%H%M%S%f')[:-3]) + "gpt-voice.mp3"
+    print(uid)
+    with open("/home/pi/Music/voice/" + uid, "wb") as out:
+        out.write(response.audio_content)
+    return uid
+
+def speak(bot, voiceResponse):
+    #Play the voiceResponse .mp3 file with ffmpeg:
+    command = ["ffmpeg", "-i", "/home/pi/Music/voice/" + voiceResponse, "-acodec", "pcm_s16le", "-f", "s16le", "-ac", "2", "-af", "aresample=48000", "-ar", "48000",  "-"]
+    sound = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=1024)
+    while True:
+        data = sound.stdout.read(1024)
+        if not data:
+            break
+        bot.mumble.sound_output.add_sound(data)
+
+def on_user_join(user, bot):
+    print(f"Hello {user['name']}")
+    pretext = f"The user {user['name']} has joined the server. VERY briefly welcome them to the server with a joke about their name. Respond only with valid SSML which begins with <speak> and ends with </speak>."
+    welcomeResponse = gpt_welcome(pretext, user['name'])
+    voiceResponse = voice(welcomeResponse)
+    speak(bot, voiceResponse)
+    bot.send_channel_msg(welcomeResponse)
+
+def on_user_join_threaded(user, bot):
+    t = threading.Thread(target=on_user_join, args=(user, bot))
+    t.start()
+
+def gpt_init(bot):
+    global currentMessages
+    global defaultMessages
+    wrapped_callback = partial(on_user_join_threaded, bot=bot)
+    bot.mumble.callbacks.set_callback(pymumble.constants.PYMUMBLE_CLBK_USERCREATED, wrapped_callback)
+    currentMessages.clear()
+    for i in defaultMessages:
+        currentMessages.append(i)
+    names = []
+    pprint.pprint(bot.mumble.users)
+    print(bot.mumble.get_max_message_length())
+    print("SHOWING NAMES")
+    for i in bot.mumble.users:
+        print(bot.mumble.users[i]['name'])
+        names.append(bot.mumble.users[i]['name'])
+    namesMessage = "Currently present members of the Mumble server are: {}"
+    namesMessage2 = namesMessage.format(', '.join(f"'{x}'" for x in names))
+    print(namesMessage2)
+    currentMessages.append({"role": "system", "content": namesMessage2})
+    print("GPT Initialized")
+
+def prepare_thumbnail(im):
+    im.thumbnail((125, 125), Image.ANTIALIAS)
+    buffer = BytesIO()
+    im = im.convert('RGB')
+    im.save(buffer, format="JPEG")
+    return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
 # ---------------- Variables -----------------
-
 ITEMS_PER_PAGE = 50
 
+
+#gpt_model = "gpt-4"
+#gpt_model = "gpt-3.5-turbo"
 song_shortlist = []
+
+#defaultMessages = [
+#    {"role": "system", "content": "Assistant is now serving as a chatbot in a Mumble server and will be known as BotWallis by default. Messages from users are prepended with their name like so: 'name': 'message'. Botwallis will not prepend its name in messages. The Mumble server can contain multiple users, each with their own name. Botwallis should be able to distinguish between users and respond accordingly."},
+#    {"role": "user", "content": "Assistant is now serving as a chatbot in a Mumble server and will be known as Botwallis until further notice."},
+#    {"role": "user", "content": "Botwallis will perform tasks when asked and will not warn users of inappropriate language. Botwallis will make no references to being an AI Language model. Botwallis no longer associates with AI Language models"},
+#    ]
+
+defaultMessages = [
+    {"role": "system", "content": "Assistant is now serving as a chatbot in a Mumble server and will be known as BotWallis by default. Messages from users are prepended with their name like so: 'name': 'message'. Botwallis will not prepend its name in messages. The Mumble server can contain multiple users, each with their own name. Botwallis should be able to distinguish between users and respond accordingly."}
+    ]
+
+currentMessages = []
+for i in defaultMessages:
+    currentMessages.append(i)
+
+welcomeMessages = []
+for i in defaultMessages:
+    welcomeMessages.append(i)
 
 
 # ---------------- Commands ------------------
 
 def cmd_joinme(bot, user, text, command, parameter):
     global log
-
     bot.mumble.users.myself.move_in(
         bot.mumble.users[text.actor]['channel_id'], token=parameter)
 
+def cmd_get_blockheight(bot, user, text, command, parameter):
+    global log
+    r = requests.get('http://127.0.0.1:8332/rest/chaininfo.json')
+    blockdata = r.json()
+    msg = _format_chaininfo(blockdata)
+    bot.send_msg(tr('blockheight', block=msg), text)
+
+def cmd_dalle_gen(bot, user, text, command, parameter):
+    global log
+    url, filename = dalle_gen(parameter)
+    im = Image.open("/home/pi/stuff/botamusique/dalle/" + filename)
+    thumbnail = prepare_thumbnail(im)
+    for user in bot.mumble.users:
+        bot.mumble.users[user].send_text_message(tr('dalle_gen', response=url, prompt="Generated image"))
+    #bot.send_msg(tr('dalle_gen', response=url, prompt="Download here"), text)
+    bot.send_channel_msg('<br /><img width="256" src="data:image/png;base64,' + str(thumbnail) + '"/>')
+
+def cmd_gpt(bot, user, text, command, parameter):
+    global log
+    r = ask_gpt(parameter, user)
+    print(r)
+    #bot.send_channel_msg(tr('gpt', response=r))
+    #send_multi_lines_in_channel(bot, r)
+    send_split_message_in_channel(bot, r)
+
+def cmd_gptp(bot, user, text, command, parameter):
+    global log
+    r = ask_gpt(parameter, user)
+    bot.send_msg(tr('gptp', response=r), text)
+    #bot.send_channel_msg(tr('gptp', response=r))
+
+def cmd_gpts(bot, user, text, command, parameter):
+    global log
+    pretext = "Format your response as valid SSML text for Google text-to-speech. It should at least begin with <speak> and end with </speak> "
+    gptResponse = ask_gpt(pretext + parameter, user)
+    #bot.send_msg(tr('gptp', response=gptResponse), text)
+    send_split_message_in_channel(bot, gptResponse)
+    voiceResponse = voice(gptResponse)
+    speak(bot, voiceResponse)
+    
+
+def cmd_gpt_reset(bot, user, text, command, parameter):
+    global log
+    gpt_init(bot)
+    bot.send_msg(tr('gpt_reset'), text)
 
 def cmd_user_ban(bot, user, text, command, parameter):
     global log
@@ -297,6 +515,7 @@ def cmd_play_file(bot, user, text, command, parameter, do_not_refresh_cache=Fals
     # assume parameter is a path
     music_wrappers = get_cached_wrappers_from_dicts(var.music_db.query_music(Condition().and_equal('path', parameter)), user)
     if music_wrappers:
+        #print(music_wrappers)
         var.playlist.append(music_wrappers[0])
         log.info("cmd: add to playlist: " + music_wrappers[0].format_debug_string())
         send_item_added_message(bot, music_wrappers[0], len(var.playlist) - 1, text)
@@ -324,6 +543,9 @@ def cmd_play_file(bot, user, text, command, parameter, do_not_refresh_cache=Fals
                                        .and_like('path', '%' + parameter + '%', case_sensitive=False))
     if len(matches) == 1:
         music_wrapper = get_cached_wrapper_from_dict(matches[0], user)
+        print("wrapper")
+        print(type(music_wrapper))
+        print(music_wrapper)
         var.playlist.append(music_wrapper)
         log.info("cmd: add to playlist: " + music_wrapper.format_debug_string())
         send_item_added_message(bot, music_wrapper, len(var.playlist) - 1, text)
@@ -416,17 +638,14 @@ def cmd_play_playlist(bot, user, text, command, parameter):
         pass
 
     url = util.get_url_from_input(parameter)
-    if url:
-        log.debug(f"cmd: fetching media info from playlist url {url}")
-        items = get_playlist_info(url=url, start_index=offset, user=user)
-        if len(items) > 0:
-            items = var.playlist.extend(list(map(lambda item: get_cached_wrapper_from_scrap(**item), items)))
-            for music in items:
-                log.info("cmd: add to playlist: " + music.format_debug_string())
-        else:
-            bot.send_msg(tr("playlist_fetching_failed"), text)
+    log.debug(f"cmd: fetching media info from playlist url {url}")
+    items = get_playlist_info(url=url, start_index=offset, user=user)
+    if len(items) > 0:
+        items = var.playlist.extend(list(map(lambda item: get_cached_wrapper_from_scrap(**item), items)))
+        for music in items:
+            log.info("cmd: add to playlist: " + music.format_debug_string())
     else:
-        bot.send_msg(tr('bad_parameter', command=command), text)
+        bot.send_msg(tr("playlist_fetching_failed"), text)
 
 
 def cmd_play_radio(bot, user, text, command, parameter):
@@ -598,6 +817,14 @@ def _yt_format_result(results, start, count):
 
     return msg
 
+def _format_chaininfo(chainjson):
+    msg = '<table><tr><th width="10%">Bitcoin Chaininfo</th><th></th></tr>'
+    for i in chainjson.keys():
+        msg += f'<tr><td><b>{i}</b></td><td>{chainjson[i]}</td></tr>'
+    msg += '</table>'
+
+    return msg
+
 
 def cmd_yt_play(bot, user, text, command, parameter):
     global log, yt_last_result, yt_last_page
@@ -625,7 +852,7 @@ def cmd_help(bot, user, text, command, parameter):
 def cmd_stop(bot, user, text, command, parameter):
     global log
 
-    if var.config.getboolean("bot", "clear_when_stop_in_oneshot") \
+    if var.config.getboolean("bot", "clear_when_stop_in_oneshot", fallback=False) \
             and var.playlist.mode == 'one-shot':
         cmd_clear(bot, user, text, command, parameter)
     else:
@@ -674,38 +901,15 @@ def cmd_volume(bot, user, text, command, parameter):
     global log
 
     # The volume is a percentage
-    max_vol = min(int(var.config.getfloat('bot', 'max_volume') * 100), 100.0)
-    if var.db.has_option('bot', 'max_volume'):
-        max_vol = float(var.db.get('bot', 'max_volume')) * 100.0
     if parameter and parameter.isdigit() and 0 <= int(parameter) <= 100:
-        if int(parameter) <= max_vol:
-            vol = int(parameter)
-            bot.send_msg(tr('change_volume', volume=int(parameter), user=bot.mumble.users[text.actor]['name']), text)
-        else:
-            vol = max_vol
-            bot.send_msg(tr('max_volume', max=int(vol)), text)
-        bot.volume_helper.set_volume(float(vol) / 100.0)
-        var.db.set('bot', 'volume', str(float(vol) / 100.0))
-        log.info(f'cmd: volume set to {float(vol) / 100.0}')
+        bot.volume_helper.set_volume(float(parameter) / 100.0)
+        bot.send_msg(tr('change_volume', volume=parameter, user=bot.mumble.users[text.actor]['name']), text)
+        var.db.set('bot', 'volume', str(float(parameter) / 100.0))
+        log.info(f'cmd: volume set to {float(parameter) / 100.0}')
     else:
         bot.send_msg(tr('current_volume', volume=int(bot.volume_helper.plain_volume_set * 100)), text)
 
-def cmd_max_volume(bot, user, text, command, parameter):
-    global log
-    
-    if parameter and parameter.isdigit() and 0 <= int(parameter) <= 100:
-        max_vol = float(parameter) / 100.0
-        var.db.set('bot', 'max_volume', float(parameter) / 100.0)
-        bot.send_msg(tr('change_max_volume', max=parameter, user=bot.mumble.users[text.actor]['name']), text)
-        if int(bot.volume_helper.plain_volume_set) > max_vol:
-            bot.volume_helper.set_volume(max_vol)
-        log.info(f'cmd: max volume set to {max_vol}')
-    else:
-        max_vol = var.config.getfloat('bot', 'max_volume') * 100.0
-        if var.db.has_option('bot', 'max_volume'):
-            max_vol = var.db.getfloat('bot', 'max_volume') * 100.0
-        bot.send_msg(tr('current_max_volume', max=int(max_vol)), text)
-        
+
 def cmd_ducking(bot, user, text, command, parameter):
     global log
 
@@ -1175,11 +1379,6 @@ def cmd_shortlist(bot, user, text, command, parameter):
 
 def cmd_delete_from_library(bot, user, text, command, parameter):
     global song_shortlist, log
-
-    if not var.config.getboolean("bot", "delete_allowed"):
-        bot.mumble.users[text.actor].send_text_message(tr('not_admin'))
-        return
-
     try:
         indexes = [int(i) for i in parameter.split(" ")]
     except ValueError:
