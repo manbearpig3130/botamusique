@@ -30,6 +30,8 @@ from database import SettingsDatabase, MusicDatabase, DatabaseMigration
 from media.item import ValidationFailedError, PreparationFailedError
 from media.cache import MusicCache
 
+# Manbearpig's imports
+from functools import partial
 
 class MumbleBot:
     version = '7.2.2'
@@ -130,7 +132,6 @@ class MumbleBot:
         self.mumble.users.myself.unmute()  # by sure the user is not muted
         self.join_channel()
         self.mumble.set_bandwidth(self.bandwidth)
-        command.gpt_init(self)
 
         # ====== Volume ======
         self.volume_helper = util.VolumeHelper()
@@ -194,6 +195,12 @@ class MumbleBot:
             if var.config.getboolean("bot", "auto_check_update"):
                 changelog = util.fetch_changelog()
                 self.send_channel_msg(tr("update_successful", version=self.version, changelog=changelog))
+        
+        ## Initialize GPT stuff
+        self.mumble.callbacks.add_callback(pymumble.constants.PYMUMBLE_CLBK_USERREMOVED, partial(command.on_user_leave_threaded, bot=self))
+        self.mumble.callbacks.add_callback(pymumble.constants.PYMUMBLE_CLBK_USERCREATED, partial(command.on_user_join_threaded, bot=self))
+        self.mumble.callbacks.add_callback(pymumble.constants.PYMUMBLE_CLBK_DISCONNECTED, partial(command.gpt_init, bot=self, save=True))
+        command.gpt_init(self)
 
     # Set the CTRL+C shortcut
     def ctrl_caught(self, signal, frame):
@@ -204,6 +211,9 @@ class MumbleBot:
                 and var.config.get("bot", "save_music_library", fallback=True):
             self.log.info("bot: save playlist into database")
             var.playlist.save()
+        
+        # Save gpt conversation
+        command.gpt_init(self, save=True)
 
         if self.nb_exit > 1:
             self.log.info("Forced Quit")

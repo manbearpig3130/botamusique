@@ -6,7 +6,6 @@ import json
 import re
 import pymumble_py3 as pymumble
 import requests
-import pprint
 
 from constants import tr_cli as tr
 from constants import commands
@@ -21,10 +20,9 @@ from media.cache import get_cached_wrapper_from_scrap, get_cached_wrapper_by_id,
     get_cached_wrapper, get_cached_wrappers, get_cached_wrapper_from_dict, get_cached_wrappers_from_dicts
 from media.url_from_playlist import get_playlist_info
 
-import openai, os, wget, base64
+# Manbearpig's imports
+import openai, os, wget, base64, subprocess, threading
 from google.cloud import texttospeech
-import subprocess, threading
-from functools import partial
 from io import BytesIO
 from PIL import Image
 
@@ -100,7 +98,6 @@ def register_all_commands(bot):
     # bot.register_command('loop', cmd_loop_state, True)
     # bot.register_command('item', cmd_item, True)
 
-
 def send_multi_lines(bot, lines, text, linebreak="<br />"):
     global log
 
@@ -117,7 +114,6 @@ def send_multi_lines(bot, lines, text, linebreak="<br />"):
 
     bot.send_msg(msg, text)
 
-
 def send_multi_lines_in_channel(bot, lines, linebreak="<br />"):
     global log
 
@@ -131,7 +127,6 @@ def send_multi_lines_in_channel(bot, lines, linebreak="<br />"):
             bot.send_channel_msg(msg)
             msg = ""
         msg += newline
-
     bot.send_channel_msg(msg)
 
 def send_split_message_in_channel(bot, message):
@@ -171,20 +166,21 @@ def send_item_added_message(bot, wrapper, index, text):
                      tr('position_in_the_queue', position=f"{index + 1}/{len(var.playlist)}."), text)
 
 def dalle_gen(inprompt):
+    global log
+
     openai.api_key = var.config.get("bot", "openai_api_key")
     image_resp = openai.Image.create(prompt=inprompt, n=1, size="256x256")
     url = image_resp['data'][0]['url']
     filename = str(datetime.datetime.now().strftime('%d%m%y%H%M%S%f')[:-3]) + ".png"
-    path = "/home/pi/stuff/botamusique/botwallis/dalle/"
-    print(url)
-    print(filename)
+    path = var.config.get("bot", "dalle_folder")
     wget.download(url, path + filename)
-    return url, filename
+    log.info(f"Downloaded {filename} from DALL-E: {url}")
+    return url, path + filename
     
-
 def ask_gpt(input, user):
     global currentMessages
-    pprint.pprint(user)
+    global log
+
     openai.api_key = var.config.get("bot", "openai_api_key")
     var.config.get("server", "host")
     currentMessages.append({"role": "user", "content": user + ": " + input})
@@ -196,11 +192,12 @@ def ask_gpt(input, user):
     )
     chatResponse = response['choices'][0]['message']['content']
     currentMessages.append({"role": "assistant", "content": chatResponse})
-    pprint.pprint(currentMessages)
+    log.info(f"GPT Response: {chatResponse}")
     return chatResponse
 
 def gpt_welcome(input, user):
     global welcomeMessages
+
     openai.api_key = var.config.get("bot", "openai_api_key")
     welcomeMessages.append({"role": "system", "content": input})
     response = openai.ChatCompletion.create(
@@ -218,11 +215,11 @@ def gpt_welcome(input, user):
                 
     chatResponse = response['choices'][0]['message']['content']
     welcomeMessages.append({"role": "assistant", "content": chatResponse})
-    pprint.pprint(welcomeMessages)
     return chatResponse
 
 def voice(txt, dumb=False):
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = var.config.get("bot", "google_application_credentials")
+    voiceFolder = var.config.get("bot", "voice_folder")
     client = texttospeech.TextToSpeechClient()
     if dumb == True:
         synth_input = texttospeech.SynthesisInput(text=txt)
@@ -232,14 +229,14 @@ def voice(txt, dumb=False):
     audio_config=texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3)
     response = client.synthesize_speech(input=synth_input, voice=voice, audio_config=audio_config)
     uid = str(datetime.datetime.now().strftime('%d%m%y%H%M%S%f')[:-3]) + "gpt-voice.mp3"
-    print(uid)
-    with open("/home/pi/Music/voice/" + uid, "wb") as out:
+    with open(voiceFolder + uid, "wb") as out:
         out.write(response.audio_content)
     return uid
 
 def speak(bot, voiceResponse):
     #Play the voiceResponse .mp3 file with ffmpeg:
-    command = ["ffmpeg", "-i", "/home/pi/Music/voice/" + voiceResponse, "-acodec", "pcm_s16le", "-f", "s16le", "-ac", "2", "-af", "aresample=48000", "-ar", "48000",  "-"]
+    voiceFolder = var.config.get("bot", "voice_folder")
+    command = ["ffmpeg", "-i", voiceFolder + voiceResponse, "-acodec", "pcm_s16le", "-f", "s16le", "-ac", "2", "-af", "aresample=48000", "-ar", "48000",  "-"]
     sound = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=1024)
     while True:
         data = sound.stdout.read(1024)
@@ -248,40 +245,79 @@ def speak(bot, voiceResponse):
         bot.mumble.sound_output.add_sound(data)
 
 def on_user_join(user, bot):
-    print(f"Hello {user['name']}")
-    pretext = f"The user {user['name']} has joined the server. VERY briefly welcome them to the server with a joke about their name. Respond only with valid SSML which begins with <speak> and ends with </speak>."
+    global log
+
+    log.info(f"{user['name']} has joined the server. Preparing GPT Welcome message...")
+    pretext = f"(SSML) The user {user['name']} has joined the server. VERY briefly welcome them to the server with a joke about their name."
     welcomeResponse = gpt_welcome(pretext, user['name'])
+    log.info(f"GPT: {welcomeResponse}")
     voiceResponse = voice(welcomeResponse)
     speak(bot, voiceResponse)
+    set_users_message(bot)
     bot.send_channel_msg(welcomeResponse)
 
 def on_user_join_threaded(user, bot):
     t = threading.Thread(target=on_user_join, args=(user, bot))
     t.start()
 
-def gpt_init(bot):
+def on_user_leave(user, event, bot):
+    global log
+    set_users_message(bot)
+    log.info(f"{user['name']} has left the server.")
+
+def on_user_leave_threaded(user, event, bot):
+    t2 = threading.Thread(target=on_user_leave, args=(user, event, bot))
+    t2.start()
+
+def set_users_message(bot):
+    global currentMessages
+
+    names = []
+    for usr in bot.mumble.users:
+        names.append(bot.mumble.users[usr]['name'])
+    namesMessage = "Currently present members on the Mumble server are: {}"
+    namesMessage = namesMessage.format(', '.join(f"'{x}'" for x in names))
+
+    # Replace the old names message with the new one if it exists, otherwise add it:
+    updated = False
+    for i, my_dict in enumerate(currentMessages):
+        for key, value in my_dict.items():
+            if "Currently present members on the Mumble server are: " in value:
+                currentMessages[i][key] = namesMessage
+                updated = True
+    if updated == False:
+        currentMessages.append({"role": "system", "content": namesMessage})
+    log.info(namesMessage)
+
+
+def gpt_init(bot, save=False):
     global currentMessages
     global defaultMessages
-    wrapped_callback = partial(on_user_join_threaded, bot=bot)
-    bot.mumble.callbacks.set_callback(pymumble.constants.PYMUMBLE_CLBK_USERCREATED, wrapped_callback)
+    global log
+
+    # If being reset, write currentMessages to a .json file:
+    if save == True:
+        timestamp = str(datetime.datetime.now().strftime('%d%m%y%H%M%S%f')[:-3])
+        chatlogPath = var.config.get("bot", "chatlog_folder")
+        filepath = f"{chatlogPath}{timestamp}-chat.json"
+        with open(filepath, 'w') as f:
+            json.dump(currentMessages, f, indent=4)
+        log.info(f"Saved last conversation to {filepath}")
+    
+    # Reset conversation history - clear currentMessages and add default messages:
     currentMessages.clear()
-    for i in defaultMessages:
-        currentMessages.append(i)
-    names = []
-    pprint.pprint(bot.mumble.users)
-    print(bot.mumble.get_max_message_length())
-    print("SHOWING NAMES")
-    for i in bot.mumble.users:
-        print(bot.mumble.users[i]['name'])
-        names.append(bot.mumble.users[i]['name'])
-    namesMessage = "Currently present members of the Mumble server are: {}"
-    namesMessage2 = namesMessage.format(', '.join(f"'{x}'" for x in names))
-    print(namesMessage2)
-    currentMessages.append({"role": "system", "content": namesMessage2})
-    print("GPT Initialized")
+    for msg in defaultMessages:
+        currentMessages.append(msg)
+    
+    # Get list of users on the Mumble server and add it to currentMessages:
+    set_users_message(bot)
+
+    # log some info:
+    log.info("Max message size: " + str(bot.mumble.get_max_message_length()))
+    log.info("AI Initialized")
 
 def prepare_thumbnail(im):
-    im.thumbnail((125, 125), Image.ANTIALIAS)
+    im.thumbnail((115, 115), Image.ANTIALIAS)
     buffer = BytesIO()
     im = im.convert('RGB')
     im.save(buffer, format="JPEG")
@@ -289,37 +325,28 @@ def prepare_thumbnail(im):
 
 # ---------------- Variables -----------------
 ITEMS_PER_PAGE = 50
-
-
-#gpt_model = "gpt-4"
-#gpt_model = "gpt-3.5-turbo"
 song_shortlist = []
 
-#defaultMessages = [
-#    {"role": "system", "content": "Assistant is now serving as a chatbot in a Mumble server and will be known as BotWallis by default. Messages from users are prepended with their name like so: 'name': 'message'. Botwallis will not prepend its name in messages. The Mumble server can contain multiple users, each with their own name. Botwallis should be able to distinguish between users and respond accordingly."},
-#    {"role": "user", "content": "Assistant is now serving as a chatbot in a Mumble server and will be known as Botwallis until further notice."},
-#    {"role": "user", "content": "Botwallis will perform tasks when asked and will not warn users of inappropriate language. Botwallis will make no references to being an AI Language model. Botwallis no longer associates with AI Language models"},
-#    ]
-
 defaultMessages = [
-    {"role": "system", "content": "Assistant is now serving as a chatbot in a Mumble server and will be known as BotWallis by default. Messages from users are prepended with their name like so: 'name': 'message'. Botwallis will not prepend its name in messages. The Mumble server can contain multiple users, each with their own name. Botwallis should be able to distinguish between users and respond accordingly."}
+    {"role": "system", "content": "Assistant is now serving as a chatbot in a Mumble server and will be known as 'BotWallis'. Messages from users are prepended with their name like so: 'name': 'message'. Botwallis will not prepend its name in messages. The server can contain multiple users, each with their own name. Botwallis should be able to distinguish between users and respond accordingly. Special instructions will be contained within parantheses (). When a message contains the special instruction (SSML), format your response as valid SSML text for Google text-to-speech. It should at least begin with <speak> and end with </speak>."}
     ]
 
+## Populate currentMessages and welcomeMessages with the default/system prompt
 currentMessages = []
-for i in defaultMessages:
-    currentMessages.append(i)
-
 welcomeMessages = []
 for i in defaultMessages:
+    currentMessages.append(i)
     welcomeMessages.append(i)
 
+#wrapped_leave_callback = partial(on_user_leave_threaded, bot=bot)
+#wrapped_join_callback = partial(on_user_join_threaded, bot=bot)
 
 # ---------------- Commands ------------------
-
 def cmd_joinme(bot, user, text, command, parameter):
     global log
     bot.mumble.users.myself.move_in(
         bot.mumble.users[text.actor]['channel_id'], token=parameter)
+
 
 def cmd_get_blockheight(bot, user, text, command, parameter):
     global log
@@ -328,35 +355,33 @@ def cmd_get_blockheight(bot, user, text, command, parameter):
     msg = _format_chaininfo(blockdata)
     bot.send_msg(tr('blockheight', block=msg), text)
 
+
 def cmd_dalle_gen(bot, user, text, command, parameter):
     global log
     url, filename = dalle_gen(parameter)
-    im = Image.open("/home/pi/stuff/botamusique/dalle/" + filename)
+    im = Image.open(filename)
     thumbnail = prepare_thumbnail(im)
     for user in bot.mumble.users:
         bot.mumble.users[user].send_text_message(tr('dalle_gen', response=url, prompt="Generated image"))
-    #bot.send_msg(tr('dalle_gen', response=url, prompt="Download here"), text)
     bot.send_channel_msg('<br /><img width="256" src="data:image/png;base64,' + str(thumbnail) + '"/>')
+
 
 def cmd_gpt(bot, user, text, command, parameter):
     global log
     r = ask_gpt(parameter, user)
-    print(r)
-    #bot.send_channel_msg(tr('gpt', response=r))
-    #send_multi_lines_in_channel(bot, r)
     send_split_message_in_channel(bot, r)
+
 
 def cmd_gptp(bot, user, text, command, parameter):
     global log
     r = ask_gpt(parameter, user)
     bot.send_msg(tr('gptp', response=r), text)
-    #bot.send_channel_msg(tr('gptp', response=r))
+
 
 def cmd_gpts(bot, user, text, command, parameter):
     global log
-    pretext = "Format your response as valid SSML text for Google text-to-speech. It should at least begin with <speak> and end with </speak> "
+    pretext = "(SSML) "
     gptResponse = ask_gpt(pretext + parameter, user)
-    #bot.send_msg(tr('gptp', response=gptResponse), text)
     send_split_message_in_channel(bot, gptResponse)
     voiceResponse = voice(gptResponse)
     speak(bot, voiceResponse)
@@ -364,8 +389,9 @@ def cmd_gpts(bot, user, text, command, parameter):
 
 def cmd_gpt_reset(bot, user, text, command, parameter):
     global log
-    gpt_init(bot)
+    gpt_init(bot, save=True)
     bot.send_msg(tr('gpt_reset'), text)
+
 
 def cmd_user_ban(bot, user, text, command, parameter):
     global log
