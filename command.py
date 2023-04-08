@@ -21,11 +21,14 @@ from media.cache import get_cached_wrapper_from_scrap, get_cached_wrapper_by_id,
 from media.url_from_playlist import get_playlist_info
 
 # Manbearpig's imports
-import openai, os, wget, base64, subprocess, threading
+import openai, os, wget, base64, subprocess, threading, time, glob
 from google.cloud import texttospeech
+from google.api_core.exceptions import InvalidArgument
 from io import BytesIO
 from PIL import Image
-
+from pydub import AudioSegment
+import random
+import pprint
 
 log = logging.getLogger("bot")
 
@@ -70,12 +73,6 @@ def register_all_commands(bot):
     bot.register_command(commands('volume'), cmd_volume)
     bot.register_command(commands('yt_play'), cmd_yt_play)
     bot.register_command(commands('yt_search'), cmd_yt_search)
-    bot.register_command(commands('blockheight'), cmd_get_blockheight)
-    bot.register_command(commands('gpt'), cmd_gpt)
-    bot.register_command(commands('gptp'), cmd_gptp)
-    bot.register_command(commands('gpt_reset'), cmd_gpt_reset)
-    bot.register_command(commands('gpts'), cmd_gpts)
-    bot.register_command(commands('dalle_gen'), cmd_dalle_gen)
 
     # admin command
     bot.register_command(commands('add_webinterface_user'), cmd_web_user_add, admin=True)
@@ -92,6 +89,21 @@ def register_all_commands(bot):
     bot.register_command(commands('url_whitelist_list'), cmd_url_whitelist_list, no_partial_match=True, admin=True)
     bot.register_command(commands('user_ban'), cmd_user_ban, no_partial_match=True, admin=True)
     bot.register_command(commands('user_unban'), cmd_user_unban, no_partial_match=True, admin=True)
+
+    ## Custom commands
+    bot.register_command(commands('blockheight'), cmd_get_blockheight)
+    bot.register_command(commands('gpt'), cmd_gpt)
+    bot.register_command(commands('gptp'), cmd_gptp)
+    bot.register_command(commands('gpt_reset'), cmd_gpt_reset)
+    bot.register_command(commands('gpts'), cmd_gpts)
+    bot.register_command(commands('dalle_gen'), cmd_dalle_gen)
+    bot.register_command(commands('listen'), cmd_listen)
+    bot.register_command(commands('listening'), cmd_listening)
+    bot.register_command(commands('roll'), cmd_roll)
+    bot.register_command(commands('gpt_model'), cmd_set_gpt_model)
+    bot.register_command(commands('jailbreak'), cmd_jailbreak)
+    bot.register_command(commands('load'), cmd_load)
+    bot.register_command(commands('debug'), cmd_print_debug)
 
     # Just for debug use
     bot.register_command('rtrms', cmd_real_time_rms, True)
@@ -129,6 +141,8 @@ def send_multi_lines_in_channel(bot, lines, linebreak="<br />"):
         msg += newline
     bot.send_channel_msg(msg)
 
+
+## Splits long messages into multiple messages if they exceed the maximum allowed length
 def send_split_message_in_channel(bot, message):
     max_message_length = bot.mumble.get_max_message_length()
 
@@ -165,76 +179,94 @@ def send_item_added_message(bot, wrapper, index, text):
         bot.send_msg(tr('file_added', item=wrapper.format_song_string()) +
                      tr('position_in_the_queue', position=f"{index + 1}/{len(var.playlist)}."), text)
 
+
+## Generate an image from text with Dalle-2
 def dalle_gen(inprompt):
     global log
 
     openai.api_key = var.config.get("bot", "openai_api_key")
     image_resp = openai.Image.create(prompt=inprompt, n=1, size="256x256")
     url = image_resp['data'][0]['url']
-    filename = str(datetime.datetime.now().strftime('%d%m%y%H%M%S%f')[:-3]) + ".png"
+    filename = str(datetime.datetime.now().strftime('%d%b%y-%H%M%S-%f')[:-3]) + ".png"
     path = var.config.get("bot", "dalle_folder")
     wget.download(url, path + filename)
     log.info(f"Downloaded {filename} from DALL-E: {url}")
     return url, path + filename
-    
-def ask_gpt(input, user):
-    global currentMessages
+
+
+## Text goes in, GPT response comes out
+def ask_gpt(bot, input, user):
+    #global currentMessages
     global log
 
     openai.api_key = var.config.get("bot", "openai_api_key")
     var.config.get("server", "host")
-    currentMessages.append({"role": "user", "content": user + ": " + input})
+    bot.currentMessages.append({"role": "user", "content": user + ": " + input})
     response = openai.ChatCompletion.create(
-        model=var.config.get("bot", "gpt_model"),
-        temperature=0.9,
+        model=bot.gpt_model,
+        temperature=float(var.config.get("bot", "gpt_temperature")),
         max_tokens=600,
-        messages=currentMessages
+        messages=bot.currentMessages
     )
     chatResponse = response['choices'][0]['message']['content']
-    currentMessages.append({"role": "assistant", "content": chatResponse})
+    bot.currentMessages.append({"role": "assistant", "content": chatResponse})
     log.info(f"GPT Response: {chatResponse}")
+    #pprint.pprint(bot.currentMessages)
     return chatResponse
 
-def gpt_welcome(input, user):
-    global welcomeMessages
+
+## Welcome messages from GPT. This is a separate function because it needs to be called from the on_user_join event
+def gpt_welcome(bot, input, user):
+    #global welcomeMessages
 
     openai.api_key = var.config.get("bot", "openai_api_key")
-    welcomeMessages.append({"role": "system", "content": input})
+    bot.welcomeMessages.append({"role": "system", "content": input})
     response = openai.ChatCompletion.create(
-        model=var.config.get("bot", "gpt_model"),
-        temperature=1.0,
+        model="gpt-3.5-turbo",
+        temperature=float(var.config.get("bot", "gpt_temperature")),
         max_tokens=400,
-        messages=welcomeMessages
+        messages=bot.welcomeMessages
     )
     ## Keep the list at 5 messages to avoid racking up too many tokens just for welcome messages
-    if len(welcomeMessages) >= 5:
-        for message in welcomeMessages:
+    if len(bot.welcomeMessages) >= 5:
+        for message in bot.welcomeMessages:
             if "has joined the server." in message['content']:
-                welcomeMessages.remove(message)
-            welcomeMessages.pop(1)
+                bot.welcomeMessages.remove(message)
+            bot.welcomeMessages.pop(1)
                 
     chatResponse = response['choices'][0]['message']['content']
-    welcomeMessages.append({"role": "assistant", "content": chatResponse})
+    bot.welcomeMessages.append({"role": "assistant", "content": chatResponse})
     return chatResponse
 
-def voice(txt, dumb=False):
+
+## Input text gets sent to google text to speech and the mp3 file is returned
+def voice(txt):
+    global log
+
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = var.config.get("bot", "google_application_credentials")
     voiceFolder = var.config.get("bot", "voice_folder")
     client = texttospeech.TextToSpeechClient()
-    if dumb == True:
-        synth_input = texttospeech.SynthesisInput(text=txt)
-    else:
-        synth_input = texttospeech.SynthesisInput(ssml=txt)
     voice = texttospeech.VoiceSelectionParams(language_code="en-GB", name="en-GB-Neural2-B")
     audio_config=texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3)
-    response = client.synthesize_speech(input=synth_input, voice=voice, audio_config=audio_config)
-    uid = str(datetime.datetime.now().strftime('%d%m%y%H%M%S%f')[:-3]) + "gpt-voice.mp3"
-    with open(voiceFolder + uid, "wb") as out:
+    synth_input = texttospeech.SynthesisInput(ssml=txt)
+    try:
+        ## Synthesize the text to speech
+        response = client.synthesize_speech(input=synth_input, voice=voice, audio_config=audio_config)
+    except InvalidArgument as e:
+        log.info(f"Input wasn't valid SSML. Using regular txt instead. {e}")
+        synth_input = texttospeech.SynthesisInput(text=txt)
+        voice = texttospeech.VoiceSelectionParams(language_code="en-GB", name="en-GB-Wavenet-B")
+        response = client.synthesize_speech(input=synth_input, voice=voice, audio_config=audio_config)
+    
+    ## Save the response as an mp3 file
+    filename = str(datetime.datetime.now().strftime('%d%b%y-%H%M%S-%f')[:-3]) + "gpt-voice.mp3"
+    with open(voiceFolder + filename, "wb") as out:
         out.write(response.audio_content)
-    return uid
+    return filename
 
+
+## Play the voiceResponse .mp3 file with ffmpeg
 def speak(bot, voiceResponse):
-    #Play the voiceResponse .mp3 file with ffmpeg:
     voiceFolder = var.config.get("bot", "voice_folder")
     command = ["ffmpeg", "-i", voiceFolder + voiceResponse, "-acodec", "pcm_s16le", "-f", "s16le", "-ac", "2", "-af", "aresample=48000", "-ar", "48000",  "-"]
     sound = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=1024)
@@ -244,33 +276,81 @@ def speak(bot, voiceResponse):
             break
         bot.mumble.sound_output.add_sound(data)
 
+
+## When a user joins, send a welcome message and update the users_message
 def on_user_join(user, bot):
     global log
 
     log.info(f"{user['name']} has joined the server. Preparing GPT Welcome message...")
     pretext = f"(SSML) The user {user['name']} has joined the server. VERY briefly welcome them to the server with a joke about their name."
-    welcomeResponse = gpt_welcome(pretext, user['name'])
+    welcomeResponse = gpt_welcome(bot, pretext, user['name'])
     log.info(f"GPT: {welcomeResponse}")
     voiceResponse = voice(welcomeResponse)
     speak(bot, voiceResponse)
     set_users_message(bot)
     bot.send_channel_msg(welcomeResponse)
+    user.send_text_message(f"Type !help to get a list of commands")
 
+
+## Convert raw PCM audio to MP3
+def convert_raw_to_mp3(raw_file_path, mp3_file_path, sample_rate=48000, channels=2):
+    # Import raw PCM audio
+    audio = AudioSegment.from_file(raw_file_path, format="raw", frame_rate=sample_rate, channels=channels, sample_width=2)
+    # Export the audio as an MP3 file
+    audio.export(mp3_file_path, format="mp3")
+
+
+## Run on_user_join in a separate thread so that it doesn't block the main thread
 def on_user_join_threaded(user, bot):
-    t = threading.Thread(target=on_user_join, args=(user, bot))
+    t = threading.Thread(target=on_user_join, name="UserJoinThread", args=(user, bot))
     t.start()
 
+
+## When a user leaves the server, update users_message and remove them from the current_speaker_list
 def on_user_leave(user, event, bot):
     global log
+
     set_users_message(bot)
     log.info(f"{user['name']} has left the server.")
+    if bot.listening:
+        if user['name'] in bot.current_speaker_list:
+            bot.current_speaker_list.remove(user['name'])
+            bot.send_channel_msg(f"{user['name']} has left the server. No longer listening to {user['name']}.")
 
+
+## Run on_user_leave in a separate thread so that it doesn't block the main thread
 def on_user_leave_threaded(user, event, bot):
-    t2 = threading.Thread(target=on_user_leave, args=(user, event, bot))
+    t2 = threading.Thread(target=on_user_leave, name="UserLeaveThread", args=(user, event, bot))
     t2.start()
 
+#Transcribe mp3 file with openai:
+def transcribe_mp3(mp3_file_path):
+    openai.api_key = var.config.get("bot", "openai_api_key")
+    mp3_file = open(mp3_file_path, "rb")
+    transcription = openai.Audio.transcribe("whisper-1", mp3_file)
+    return transcription.text
+
+## When a user who BotWatch is listening to speaks, this function is called to record their audio
+def listen_handler(user, soundchunk, bot):
+    global log
+
+    if user['name'] in bot.current_speaker_list:
+        bot.last_recieved_timestamps[user['name']] = time.time()
+        path = f"{var.config.get('bot', 'tmp_folder')}{user['name']}.raw"
+        with open(path, "ab") as f:
+            f.write(soundchunk.pcm)
+        print(".", end="", flush=True)
+
+
+## Run the listen_handler function in a separate thread
+def listen_handler_threaded(user, soundchunk, bot):
+    t3 = threading.Thread(target=listen_handler, name="listenHandlerThread", args=(user, soundchunk, bot))
+    t3.start()
+
+
+## Sets the users message to the current list of users on the server, so BotWallis knows who is present
 def set_users_message(bot):
-    global currentMessages
+    #global currentMessages
 
     names = []
     for usr in bot.mumble.users:
@@ -280,34 +360,48 @@ def set_users_message(bot):
 
     # Replace the old names message with the new one if it exists, otherwise add it:
     updated = False
-    for i, my_dict in enumerate(currentMessages):
+    for i, my_dict in enumerate(bot.currentMessages):
         for key, value in my_dict.items():
             if "Currently present members on the Mumble server are: " in value:
-                currentMessages[i][key] = namesMessage
+                bot.currentMessages[i][key] = namesMessage
                 updated = True
     if updated == False:
-        currentMessages.append({"role": "system", "content": namesMessage})
+        bot.currentMessages.append({"role": "system", "content": namesMessage})
     log.info(namesMessage)
 
-
+## Initialize the GPT stuff. This is called when the bot starts up and when the bot is reset:
 def gpt_init(bot, save=False):
-    global currentMessages
-    global defaultMessages
     global log
 
     # If being reset, write currentMessages to a .json file:
-    if save == True:
-        timestamp = str(datetime.datetime.now().strftime('%d%m%y%H%M%S%f')[:-3])
+    if save == True and len(bot.currentMessages) > 6 and bot.loadedConversation == False:
+        timestamp = str(datetime.datetime.now().strftime('%d%b%y-%H%M%S-%f')[:-3])
         chatlogPath = var.config.get("bot", "chatlog_folder")
         filepath = f"{chatlogPath}{timestamp}-chat.json"
         with open(filepath, 'w') as f:
-            json.dump(currentMessages, f, indent=4)
+            json.dump(bot.currentMessages, f, indent=4)
         log.info(f"Saved last conversation to {filepath}")
     
     # Reset conversation history - clear currentMessages and add default messages:
-    currentMessages.clear()
-    for msg in defaultMessages:
-        currentMessages.append(msg)
+    var.config.read('configuration.ini')
+    bot.loadedConversation = False
+    bot.defaultMessages.clear()
+    bot.defaultMessages = [
+    {"role": "system", "content": f"{var.config.get('bot', 'gpt_system_message')}"}
+    ]
+    if bot.jailbreak:
+        bot.jailbreakPrompt = bot.jailbreakPrompt
+        bot.defaultMessages.append({"role": "system", "content": f"{bot.jailbreakPrompt}"})
+    bot.currentMessages.clear()
+    for msg in bot.defaultMessages:
+        bot.currentMessages.append(msg)
+        bot.welcomeMessages.append(msg)
+
+    ## Reset GPT model
+    bot.gpt_model = var.config.get("bot", "gpt_model")
+
+    ## Stop listening to users who BotWallis is currently listening to:
+    bot.current_speaker_list.clear()
     
     # Get list of users on the Mumble server and add it to currentMessages:
     set_users_message(bot)
@@ -316,38 +410,301 @@ def gpt_init(bot, save=False):
     log.info("Max message size: " + str(bot.mumble.get_max_message_length()))
     log.info("AI Initialized")
 
+## Magic to allow images to be sent in the chat:
 def prepare_thumbnail(im):
-    im.thumbnail((115, 115), Image.ANTIALIAS)
+    im.thumbnail((100, 100), Image.ANTIALIAS)
     buffer = BytesIO()
     im = im.convert('RGB')
     im.save(buffer, format="JPEG")
     return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
-# ---------------- Variables -----------------
+## Function to return a user's ID by their name:
+def get_user_by_name(bot, name):
+    for user in bot.mumble.users:
+        if bot.mumble.users[user]['name'] == name:
+            return user
+
+
+def ask_gpt_thread(bot, input, user, result_container):
+    result_container.append(ask_gpt(bot, input, user))
+
+def voice_response_thread(bot, input, result_container):
+    result_container.append(voice(input))
+
+## When BotWallis is listening, and a user stops talking, this function is called:
+def handle_user_inactivity(user, bot):
+    global log
+    
+    print(f"{user} has stopped sending sound")
+    log.info(f"Converting {user}.raw to mp3")
+    convert_raw_to_mp3(f"{var.config.get('bot', 'tmp_folder')}{user}.raw", f"{var.config.get('bot', 'tmp_folder')}{user}.mp3")
+    os.remove(f"{var.config.get('bot', 'tmp_folder')}{user}.raw")
+    log.info(f"Transcribing {user}.mp3")
+    u = get_user_by_name(bot, user)
+    try:
+        transcription = transcribe_mp3(f"{var.config.get('bot', 'tmp_folder')}{user}.mp3")
+    except openai.error.InvalidRequestError as e:
+        bot.mumble.users[u].send_text_message(f"Error: {e}")
+        log.info(f"Error: {e}")
+        return
+
+    log.info(f"{transcription}")
+    if transcription == "":
+        log.info(f"Transcription was empty. Skipping.")
+        bot.mumble.users[u].send_text_message(f"Transcription was empty. Skipping.")
+        return
+    
+    bot.mumble.users[u].send_text_message(f"Transcription: {transcription}")
+    pretext = "(SSML) "
+    print("Getting GPT response.", end="")
+    result_container = []
+    gthread = threading.Thread(target=ask_gpt_thread, name="askGptThread", args=(bot, pretext + transcription, user, result_container))
+    gthread.start()
+    while gthread.is_alive():
+        print(".", end="", flush=True)
+        time.sleep(0.25)
+    gptResponse = result_container[0]
+    send_split_message_in_channel(bot, gptResponse)
+
+    vthread = threading.Thread(target=voice_response_thread, name="voiceResponseThread", args=(bot, gptResponse, result_container))
+    vthread.start()
+    print("\nGetting voice response.", end="")
+    while vthread.is_alive():
+        print(".", end="", flush=True)
+        time.sleep(0.25)
+    voiceResponse = result_container[1]
+    speak(bot, voiceResponse)
+
+
+## Tracks the last time a user sent sound, and if they haven't sent sound for a while, calls handle_user_inactivity():
+def check_inactivity_thread(bot):
+    global log
+    timeout = 0.5
+
+    while not bot.stop_event.is_set():
+        current_time = time.time()
+        inactive_users = [username for username, timestamp in bot.last_recieved_timestamps.items() if current_time - timestamp > timeout]
+        for user in inactive_users:
+            log.info(f"No sound recieved for {timeout} seconds from {user}.")
+            handle_user_inactivity(user, bot)
+            del bot.last_recieved_timestamps[user]
+        time.sleep(0.1)
+
+
+## Function to toggle listening thread:
+def toggle_listening(bot):
+    global log
+
+    bot.listening = not bot.listening
+    if bot.listening == True:
+        bot.mumble.set_receive_sound(1)
+        bot.stop_event = threading.Event()
+        bot.inactivity_thread = threading.Thread(target=check_inactivity_thread, args=(bot,), name="inactivityThread")
+        bot.inactivity_thread.start()
+        log.info("BotWallis is now listening.")
+    else:
+        bot.mumble.set_receive_sound(0)
+        bot.stop_event.set()
+        bot.inactivity_thread.join()
+        log.info("BotWallis is no longer listening.")
+
+
+## get, set or list GPT models:
+def set_gpt_model(bot, model):
+    global log
+
+    if model == "":
+        return f"Current GPT model: {bot.gpt_model}"
+    openai.api_key = var.config.get("bot", "openai_api_key")
+    modelsDict = openai.Model.list()
+    models = []
+    for m in modelsDict['data']:
+        models.append(m['id'])
+    
+    if model in models:
+        bot.gpt_model = model
+        log.info(f"Set GPT model to {model}")
+        return f"Set GPT model to {model}"
+    elif model == "list":
+        return f"Available models: {models}"
+    else:
+        return f"Model {model} not found. Type '!gpt_model list' to see available models."
+
+def load_conversation(bot, filename, setusers=True):
+    global log
+
+    path = var.config.get("bot", "chatlog_folder")
+    if not os.path.isabs(filename):
+        filename = os.path.join(path, filename)
+    
+    ## load json from file:
+    with open((filename), 'r') as f:
+        data = json.load(f)
+    bot.currentMessages.clear()
+    for message in data:
+        #pprint.pprint(message)
+        bot.currentMessages.append(message)
+    log.info(f"Loaded conversation from {filename}")
+    bot.loadedConversation = True
+    if setusers:
+        set_users_message(bot)
+    #pprint.pprint(bot.currentMessages)
+
+
+# ------------------------------------ Variables ------------------------------------
 ITEMS_PER_PAGE = 50
 song_shortlist = []
+# ------------------------------------ Commands ------------------------------------
 
-defaultMessages = [
-    {"role": "system", "content": "Assistant is now serving as a chatbot in a Mumble server and will be known as 'BotWallis'. Messages from users are prepended with their name like so: 'name': 'message'. Botwallis will not prepend its name in messages. The server can contain multiple users, each with their own name. Botwallis should be able to distinguish between users and respond accordingly. Special instructions will be contained within parantheses (). When a message contains the special instruction (SSML), format your response as valid SSML text for Google text-to-speech. It should at least begin with <speak> and end with </speak>."}
-    ]
+## Toggle listening for specified user, or user who called the command if input is blank
+def cmd_listen(bot, user, text, command, parameter):
+    global log
 
-## Populate currentMessages and welcomeMessages with the default/system prompt
-currentMessages = []
-welcomeMessages = []
-for i in defaultMessages:
-    currentMessages.append(i)
-    welcomeMessages.append(i)
+    if parameter == '':
+        if user not in bot.current_speaker_list:
+            bot.current_speaker_list.append(user)
+            l = True
+        else:
+            bot.current_speaker_list.remove(user)
+            l = False
+        bot.send_channel_msg(tr('listen', user=user, l=l))
+    elif get_user_by_name(bot, parameter):
+        if parameter not in bot.current_speaker_list:
+            bot.current_speaker_list.append(parameter)
+            l = True
+        else:
+            bot.current_speaker_list.remove(parameter)
+            l = False
+        bot.send_channel_msg(tr('listen', user=parameter, l=l))
+    else:
+        bot.send_channel_msg(f"Can't find user {parameter}")
+        
 
-#wrapped_leave_callback = partial(on_user_leave_threaded, bot=bot)
-#wrapped_join_callback = partial(on_user_join_threaded, bot=bot)
+## Set the GPT model to use. If no model is specified, return the current model. If "list" is specified, return a list of available models.
+def cmd_set_gpt_model(bot, user, text, command, parameter):
+    global log
 
-# ---------------- Commands ------------------
+    m = set_gpt_model(bot, parameter)
+    if "Available models: " in m:
+        bot.send_msg(m, text)
+    else:
+        bot.send_channel_msg(m)
+
+
+## Toggle listening thread on/off
+def cmd_listening(bot, user, text, command, parameter):
+    global log
+    toggle_listening(bot)
+
+## Load a previous conversation
+def cmd_load(bot, user, text, command, parameter):
+    global log
+
+    def get_last_x_files(x, startfrom=0):
+        files = glob.glob(os.path.join(var.config.get("bot", "chatlog_folder"), "*"))
+        files.sort(key=os.path.getmtime, reverse=True)
+        start_index = startfrom
+        end_index = start_index + x
+        recent_files = files[start_index:end_index]
+        numbered_files = [(i + 1 + startfrom, file) for i, file in enumerate(recent_files)]
+        return numbered_files
+    
+    def is_pattern(s):
+        pattern = r'^s\d+$'
+        return bool(re.match(pattern, s))
+
+    def is_int(s):
+        try:
+            int(s)
+            return True
+        except ValueError:
+            return False
+
+    if parameter == "":
+        msg = _format_chatlogs(get_last_x_files(10))
+        bot.send_msg(f"{msg}", text)
+    if is_pattern(parameter):
+        n = int(parameter[1:])
+        msg = _format_chatlogs(get_last_x_files(10, n))
+        bot.send_msg(f"{msg}", text)
+    elif ".json" in parameter:
+        load_conversation(bot, parameter)
+        bot.send_msg(f"Loaded conversation from {parameter}", text)
+    elif is_int(parameter):
+        numbered_files = get_last_x_files(int(parameter))
+        try:
+            load_conversation(bot, numbered_files[int(parameter) - 1][1])
+            bot.send_msg(f"Loaded conversation from {numbered_files[int(parameter) - 1][1]}", text)
+        except IndexError:
+            bot.send_msg(f"Invalid index {parameter}", text)
+
+## Ask BotWallis to join the channel which the calling user is in. Optional token provided as argument if required
 def cmd_joinme(bot, user, text, command, parameter):
     global log
     bot.mumble.users.myself.move_in(
         bot.mumble.users[text.actor]['channel_id'], token=parameter)
 
+def cmd_print_debug(bot, user, text, command, parameter):
+    global log
+    pprint.pprint(bot.currentMessages)
 
+
+def cmd_jailbreak(bot, user, text, command, parameter):
+    global log
+
+    if parameter == "list" or parameter == "print":
+        bot.send_msg(f"{bot.jailbreakPrompt}", text)
+        return
+
+    elif parameter.startswith("set "):
+        bot.jailbreakPrompt = parameter[4:]
+        bot.send_msg(f"Set jailbreak prompt", text)
+    elif parameter == "reset":
+        gpt_init(bot)
+        bot.jailbreakPrompt = var.config.get('bot', 'jailbreak_message')
+        bot.send_msg(f"Reset jailbreak prompt. Resetting...", text)
+        return
+    else:
+        bot.jailbreak = not bot.jailbreak
+        if bot.jailbreak:
+            bot.send_channel_msg(f"Applied jailbreak prompt. Resetting...")
+        else:
+            bot.send_channel_msg(f"Removed jailbreak prompt. Resetting...")
+    gpt_init(bot)
+    bot.send_msg(tr('gpt_reset', model=bot.gpt_model), text)
+
+## Roll a die. This way we don't consume a kettle's worth of electricity when asking GPT to do it every time.
+def cmd_roll(bot, user, text, command, parameter):
+    global log
+
+    def borked(bot, user):
+        bot.send_channel_msg(f"{user} appears to be retarded. Rolling a d6.")
+        result = random.randint(1, 6)
+        bot.send_channel_msg(tr('roll', user=user, max=6, result=result))
+
+    if len(parameter.split(" ")) == 2:
+        num1 = parameter.split(" ")[0]
+        num2 = parameter.split(" ")[1]
+        try:
+            result = random.randint(int(num1), int(num2))
+            bot.send_channel_msg(tr('roll', user=user, max=num2, result=result))
+        except:
+            borked(bot, user)
+    elif len(parameter.split(" ")) == 1 and parameter != "":
+        num1 = parameter.split(" ")[0]
+        try:
+            result = random.randint(1, int(num1))
+            bot.send_channel_msg(tr('roll', user=user, max=num1, result=result))
+        except:
+            borked(bot, user)
+    elif parameter == "":
+        result = random.randint(1, 6)
+        bot.send_channel_msg(tr('roll', user=user, max=6, result=result))
+    else:
+        borked(bot, user)
+
+
+## Get Bitcoin blockchain info
 def cmd_get_blockheight(bot, user, text, command, parameter):
     global log
     r = requests.get('http://127.0.0.1:8332/rest/chaininfo.json')
@@ -356,6 +713,7 @@ def cmd_get_blockheight(bot, user, text, command, parameter):
     bot.send_msg(tr('blockheight', block=msg), text)
 
 
+## Generate an image with DALL-E 2.0 from input text
 def cmd_dalle_gen(bot, user, text, command, parameter):
     global log
     url, filename = dalle_gen(parameter)
@@ -363,34 +721,38 @@ def cmd_dalle_gen(bot, user, text, command, parameter):
     thumbnail = prepare_thumbnail(im)
     for user in bot.mumble.users:
         bot.mumble.users[user].send_text_message(tr('dalle_gen', response=url, prompt="Generated image"))
-    bot.send_channel_msg('<br /><img width="256" src="data:image/png;base64,' + str(thumbnail) + '"/>')
+    bot.send_channel_msg('<br /><img width="200" src="data:image/png;base64,' + str(thumbnail) + '"/>')
 
 
+## Ask GPT to generate a response in text
 def cmd_gpt(bot, user, text, command, parameter):
     global log
-    r = ask_gpt(parameter, user)
+    r = ask_gpt(bot, parameter, user)
     send_split_message_in_channel(bot, r)
 
 
+## Ask GPT to generate a response in text, responding via private message
 def cmd_gptp(bot, user, text, command, parameter):
     global log
-    r = ask_gpt(parameter, user)
+    r = ask_gpt(bot, parameter, user)
     bot.send_msg(tr('gptp', response=r), text)
 
 
+## Ask GPT to generate a response and speak it out with google text-to-speech engine
 def cmd_gpts(bot, user, text, command, parameter):
     global log
     pretext = "(SSML) "
-    gptResponse = ask_gpt(pretext + parameter, user)
+    gptResponse = ask_gpt(bot, pretext + parameter, user)
     send_split_message_in_channel(bot, gptResponse)
     voiceResponse = voice(gptResponse)
     speak(bot, voiceResponse)
     
 
+## Reset the GPT conversation history and GPT model. Stops listening
 def cmd_gpt_reset(bot, user, text, command, parameter):
     global log
     gpt_init(bot, save=True)
-    bot.send_msg(tr('gpt_reset'), text)
+    bot.send_msg(tr('gpt_reset', model=bot.gpt_model), text)
 
 
 def cmd_user_ban(bot, user, text, command, parameter):
@@ -541,7 +903,6 @@ def cmd_play_file(bot, user, text, command, parameter, do_not_refresh_cache=Fals
     # assume parameter is a path
     music_wrappers = get_cached_wrappers_from_dicts(var.music_db.query_music(Condition().and_equal('path', parameter)), user)
     if music_wrappers:
-        #print(music_wrappers)
         var.playlist.append(music_wrappers[0])
         log.info("cmd: add to playlist: " + music_wrappers[0].format_debug_string())
         send_item_added_message(bot, music_wrappers[0], len(var.playlist) - 1, text)
@@ -851,6 +1212,16 @@ def _format_chaininfo(chainjson):
 
     return msg
 
+
+def _format_chatlogs(inputList):
+    msg = '<table><tr><th width="10%">#</th><th>Recent Conversations</th><th>Last message</th></tr>'
+    for i in inputList:
+        with open(i[1]) as f:
+            data = json.load(f)
+            last_message = data[-1]['content']
+        msg += f'<tr><td><b>{i[0]}</b></td><td>{os.path.basename(i[1])}</td><td>{last_message}</td></tr>'
+    msg += '</table>'
+    return msg
 
 def cmd_yt_play(bot, user, text, command, parameter):
     global log, yt_last_result, yt_last_page

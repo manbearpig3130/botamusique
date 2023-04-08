@@ -32,6 +32,7 @@ from media.cache import MusicCache
 
 # Manbearpig's imports
 from functools import partial
+#from command import listening, toggle_listening
 
 class MumbleBot:
     version = '7.2.2'
@@ -40,6 +41,7 @@ class MumbleBot:
         self.log = logging.getLogger("bot")
         self.log.info(f"bot: botamusique version {self.get_version()}, starting...")
         signal.signal(signal.SIGINT, self.ctrl_caught)
+        signal.signal(signal.SIGTERM, self.ctrl_caught)
         self.cmd_handle = {}
 
         self.stereo = var.config.getboolean('bot', 'stereo', fallback=True)
@@ -167,7 +169,7 @@ class MumbleBot:
         if var.config.get("bot", "when_nobody_in_channel", fallback='') in ['pause', 'pause_resume', 'stop']:
             user_change_callback = \
                 lambda user, action: threading.Thread(target=self.users_changed,
-                                                      args=(user, action), daemon=True).start()
+                                                      args=(user, action), daemon=True, name="usersChangedThread").start()
             self.mumble.callbacks.set_callback(pymumble.constants.PYMUMBLE_CLBK_USERREMOVED, user_change_callback)
             self.mumble.callbacks.set_callback(pymumble.constants.PYMUMBLE_CLBK_USERUPDATED, user_change_callback)
 
@@ -200,20 +202,39 @@ class MumbleBot:
         self.mumble.callbacks.add_callback(pymumble.constants.PYMUMBLE_CLBK_USERREMOVED, partial(command.on_user_leave_threaded, bot=self))
         self.mumble.callbacks.add_callback(pymumble.constants.PYMUMBLE_CLBK_USERCREATED, partial(command.on_user_join_threaded, bot=self))
         self.mumble.callbacks.add_callback(pymumble.constants.PYMUMBLE_CLBK_DISCONNECTED, partial(command.gpt_init, bot=self, save=True))
+        self.mumble.callbacks.add_callback(pymumble.constants.PYMUMBLE_CLBK_SOUNDRECEIVED, partial(command.listen_handler_threaded, bot=self))
+        self.listening = False
+        self.current_speaker_list = []
+        self.last_recieved_timestamps = {}
+        self.stop_event = threading.Event()
+        self.inactivity_thread = None
+        self.defaultMessages = {}
+        self.currentMessages = []
+        self.welcomeMessages = []
+        self.jailbreakPrompt = var.config.get("bot", "jailbreak_message")
+        self.jailbreak = True
+        self.loadedConversation = False
         command.gpt_init(self)
+        command.toggle_listening(self)
 
     # Set the CTRL+C shortcut
-    def ctrl_caught(self, signal, frame):
+    def ctrl_caught(self, signum, frame):
+        signame = signal.Signals(signum).name
+        self.log.info(signame)
         self.log.info(
-            "\nSIGINT caught, quitting, {} more to kill".format(2 - self.nb_exit))
+            "\n" + signame + " caught, quitting, {} more to kill".format(2 - self.nb_exit))
 
         if var.config.getboolean('bot', 'save_playlist', fallback=True) \
                 and var.config.get("bot", "save_music_library", fallback=True):
             self.log.info("bot: save playlist into database")
             var.playlist.save()
-        
-        # Save gpt conversation
         command.gpt_init(self, save=True)
+        print(self.listening)
+        for thread in threading.enumerate():
+            print(f"Thread name: {thread.name}, Thread ID: {thread.ident}, Daemon: {thread.daemon}")
+        if self.listening:
+            command.toggle_listening(self)
+        # Save gpt conversation
 
         if self.nb_exit > 1:
             self.log.info("Forced Quit")
@@ -583,6 +604,7 @@ class MumbleBot:
                             self._loop_status = 'Wait for the next item to be ready'
                     else:
                         self.wait_for_ready = False
+            
 
         while self.mumble.sound_output.get_buffer_size() > 0 and self.mumble.is_alive():
             # Empty the buffer before exit
